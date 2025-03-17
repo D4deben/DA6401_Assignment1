@@ -1,215 +1,241 @@
 import argparse
-import wandb
 import numpy as np
-from tensorflow.keras.datasets import mnist, fashion_mnist
+import matplotlib.pyplot as plt
+import wandb
+from keras.datasets import fashion_mnist
 
-# Activation functions and their derivatives
-def sigmoid(z):
-    return 1 / (1 + np.exp(-z))
-
-def sigmoid_derivative(h):
-    return h * (1 - h)
-
-def tanh(z):
-    return np.tanh(z)
-
-def tanh_derivative(h):
-    return 1 - h**2
-
-def relu(z):
-    return np.maximum(0, z)
-
-def relu_derivative(h):
-    return (h > 0).astype(float)
-
-def identity(z):
-    return z
-
-def identity_derivative(h):
-    return np.ones_like(h)
-
-def softmax(z):
-    exp_z = np.exp(z - np.max(z, axis=0, keepdims=True))
-    return exp_z / np.sum(exp_z, axis=0, keepdims=True)
-
-# Loss functions
-def cross_entropy_loss(y, y_hat):
-    return -np.mean(np.sum(y * np.log(y_hat + 1e-9), axis=0))
-
-def mean_squared_error(y, y_hat):
-    return np.mean(np.sum((y - y_hat)**2, axis=0))
-
-class NeuralNetwork:
+class FeedForward:
     def __init__(self, config):
         self.config = config
-        self.layers = self._create_layers()
-        self.parameters = self._initialize_parameters()
+        self.layer_dims = self._create_architecture()
+        self.theta = self._initialize_parameters()
         self.optimizer_state = {}
-    
-    def _create_layers(self):
-        return [self.config.hidden_size] * self.config.num_layers + [10]
-    
+        (self.X_train, self.y_train), (self.X_val, self.y_val) = self._load_and_split_data()
+        self._prepare_test_data()
+        self._initialize_optimizer()
+
+    def _create_architecture(self):
+        layer_dims = [784]  # Input layer
+        layer_dims += [self.config.hidden_size] * self.config.num_layers
+        layer_dims.append(10)  # Output layer
+        return layer_dims
+
     def _initialize_parameters(self):
-        parameters = {}
-        input_size = 784
-        for i, size in enumerate(self.layers):
-            if self.config.weight_init == "Xavier":
-                scale = np.sqrt(2.0 / (input_size + size))
+        np.random.seed(42)
+        theta = {}
+        for l in range(1, len(self.layer_dims)):
+            prev_dim = self.layer_dims[l-1]
+            curr_dim = self.layer_dims[l]
+
+            if self.config.weight_init == 'xavier':
+                scale = np.sqrt(2.0/(prev_dim + curr_dim)) if self.config.activation == 'relu' \
+                    else np.sqrt(1.0/prev_dim)
             else:
                 scale = 0.01
-            parameters[f'W{i+1}'] = np.random.randn(size, input_size) * scale
-            parameters[f'b{i+1}'] = np.zeros((size, 1))
-            input_size = size
-        return parameters
-    
-    def _get_activation(self, name):
-        activations = {
-            "sigmoid": (sigmoid, sigmoid_derivative),
-            "tanh": (tanh, tanh_derivative),
-            "ReLU": (relu, relu_derivative),
-            "identity": (identity, identity_derivative)
-        }
-        return activations[name]
-    
+
+            theta[f'W{l}'] = np.random.randn(curr_dim, prev_dim) * scale
+            theta[f'b{l}'] = np.zeros((curr_dim, 1))
+        return theta
+
+    def _load_and_split_data(self):
+        (X_train_full, y_train_full), (_, _) = fashion_mnist.load_data()
+        m = X_train_full.shape[0]
+        split = int(m * 0.9)
+
+        X_train = X_train_full[:split].reshape(split, -1).T / 255.0
+        y_train = np.eye(10)[y_train_full[:split]].T
+        X_val = X_train_full[split:].reshape(m-split, -1).T / 255.0
+        y_val = np.eye(10)[y_train_full[split:]].T
+
+        return (X_train, y_train), (X_val, y_val)
+
+    def _prepare_test_data(self):
+        (_, _), (X_test, y_test) = fashion_mnist.load_data()
+        self.X_test = X_test.reshape(X_test.shape[0], -1).T / 255.0
+        self.y_test = np.eye(10)[y_test].T
+
+    def _activation(self, z, derivative=False):
+        if self.config.activation == 'sigmoid':
+            return self._sigmoid(z, derivative)
+        elif self.config.activation == 'tanh':
+            return self._tanh(z, derivative)
+        elif self.config.activation == 'relu':
+            return self._relu(z, derivative)
+
+    @staticmethod
+    def _sigmoid(z, derivative=False):
+        if derivative:
+            return z * (1 - z)
+        return 1 / (1 + np.exp(-z))
+
+    @staticmethod
+    def _tanh(z, derivative=False):
+        if derivative:
+            return 1 - z**2
+        return np.tanh(z)
+
+    @staticmethod
+    def _relu(z, derivative=False):
+        if derivative:
+            return (z > 0).astype(float)
+        return np.maximum(0, z)
+
+    def _softmax(self, z):
+        exp_z = np.exp(z - np.max(z, axis=0, keepdims=True))
+        return exp_z / np.sum(exp_z, axis=0, keepdims=True)
+
     def forward(self, X):
-        activation, _ = self._get_activation(self.config.activation)
+        fpass = {}
         A = X
-        caches = []
-        for i in range(len(self.layers) - 1):
-            Z = np.dot(self.parameters[f'W{i+1}'], A) + self.parameters[f'b{i+1}']
-            A = activation(Z)
-            caches.append((A, Z))
-        Z_out = np.dot(self.parameters[f'W{len(self.layers)}'], A) + self.parameters[f'b{len(self.layers)}']
-        A_out = softmax(Z_out)
-        caches.append((A_out, Z_out))
-        return A_out, caches
-    
-    def backward(self, X, Y, caches):
+        L = len(self.theta) // 2
+
+        for l in range(1, L):
+            fpass[f'a{l}'] = np.dot(self.theta[f'W{l}'], A) + self.theta[f'b{l}']
+            fpass[f'h{l}'] = self._activation(fpass[f'a{l}'])
+            A = fpass[f'h{l}']
+
+        fpass[f'a{L}'] = np.dot(self.theta[f'W{L}'], A) + self.theta[f'b{L}']
+        fpass['y_hat'] = self._softmax(fpass[f'a{L}'])
+        return fpass
+
+    def backward(self, X, Y, fpass):
         grads = {}
+        L = len(self.theta) // 2
         m = X.shape[1]
-        A_out, Z_out = caches[-1]
-        dZ = A_out - Y
-        
-        for i in reversed(range(len(self.layers))):
-            grads[f'W{i+1}'] = np.dot(dZ, caches[i-1][0].T if i > 0 else X.T) / m
-            grads[f'b{i+1}'] = np.sum(dZ, axis=1, keepdims=True) / m
-            if i > 0:
-                _, activation_derivative = self._get_activation(self.config.activation)
-                dA = np.dot(self.parameters[f'W{i+1}'].T, dZ)
-                dZ = dA * activation_derivative(caches[i-1][1])
-        
+        d_aL = fpass['y_hat'] - Y
+
+        for l in range(L, 0, -1):
+            A_prev = X if l == 1 else fpass[f'h{l-1}']
+            grads[f'W{l}'] = np.dot(d_aL, A_prev.T)/m
+            grads[f'b{l}'] = np.sum(d_aL, axis=1, keepdims=True)/m
+
+            if self.config.weight_decay > 0:
+                grads[f'W{l}'] += (self.config.weight_decay * self.theta[f'W{l}'])/m
+
+            if l > 1:
+                d_h = np.dot(self.theta[f'W{l}'].T, d_aL)
+                d_aL = d_h * self._activation(fpass[f'h{l-1}'], derivative=True)
+
         return grads
-    
-    def update_parameters(self, grads):
-        if self.config.optimizer == "sgd":
-            for key in self.parameters:
-                self.parameters[key] -= self.config.learning_rate * grads[key]
-        
-        elif self.config.optimizer == "momentum":
-            if 'v' not in self.optimizer_state:
-                self.optimizer_state['v'] = {k: np.zeros_like(v) for k, v in self.parameters.items()}
-            for key in self.parameters:
-                self.optimizer_state['v'][key] = (self.config.momentum * self.optimizer_state['v'][key] + 
-                                                  self.config.learning_rate * grads[key])
-                self.parameters[key] -= self.optimizer_state['v'][key]
-        
-        elif self.config.optimizer == "nag":
-            if 'v' not in self.optimizer_state:
-                self.optimizer_state['v'] = {k: np.zeros_like(v) for k, v in self.parameters.items()}
-            for key in self.parameters:
-                v_prev = self.optimizer_state['v'][key]
-                self.optimizer_state['v'][key] = self.config.momentum * v_prev + self.config.learning_rate * grads[key]
-                self.parameters[key] -= self.config.momentum * v_prev + (1 - self.config.momentum) * self.optimizer_state['v'][key]
-        
-        elif self.config.optimizer == "rmsprop":
-            if 's' not in self.optimizer_state:
-                self.optimizer_state['s'] = {k: np.zeros_like(v) for k, v in self.parameters.items()}
-            for key in self.parameters:
-                self.optimizer_state['s'][key] = (self.config.beta * self.optimizer_state['s'][key] + 
-                                                  (1 - self.config.beta) * np.square(grads[key]))
-                self.parameters[key] -= (self.config.learning_rate / (np.sqrt(self.optimizer_state['s'][key]) + self.config.epsilon)) * grads[key]
-        
-        elif self.config.optimizer in ["adam", "nadam"]:
-            if 'm' not in self.optimizer_state:
-                self.optimizer_state['m'] = {k: np.zeros_like(v) for k, v in self.parameters.items()}
-                self.optimizer_state['v'] = {k: np.zeros_like(v) for k, v in self.parameters.items()}
-                self.optimizer_state['t'] = 0
-            
+
+    def compute_loss(self, y, y_hat):
+        cross_entropy = -np.mean(np.sum(y * np.log(y_hat + 1e-9), axis=0))
+        if self.config.weight_decay > 0:
+            l2_penalty = sum(np.sum(np.square(w)) for w in self.theta.values() if w.ndim > 1)
+            cross_entropy += (self.config.weight_decay * l2_penalty)/(2 * y.shape[1])
+        return cross_entropy
+
+    def _initialize_optimizer(self):
+        opt = self.config.optimizer
+        if opt in ['momentum', 'nesterov']:
+            self.optimizer_state = {k: np.zeros_like(v) for k, v in self.theta.items()}
+        elif opt in ['rmsprop']:
+            self.optimizer_state = {k: np.zeros_like(v) for k, v in self.theta.items()}
+        elif opt in ['adam', 'nadam']:
+            self.optimizer_state = {
+                'm': {k: np.zeros_like(v) for k, v in self.theta.items()},
+                'v': {k: np.zeros_like(v) for k, v in self.theta.items()},
+                't': 0
+            }
+
+    def _update_parameters(self, grads):
+        opt = self.config.optimizer
+        lr = self.config.lr
+        beta = 0.9
+        beta1, beta2 = 0.9, 0.999
+        epsilon = 1e-8
+
+        if opt == 'sgd':
+            for key in self.theta:
+                self.theta[key] -= lr * grads[key]
+
+        elif opt in ['momentum', 'nesterov']:
+            for key in self.theta:
+                self.optimizer_state[key] = beta * self.optimizer_state[key] + (1 - beta) * grads[key]
+                self.theta[key] -= lr * self.optimizer_state[key]
+
+                if opt == 'nesterov':
+                    self.theta[key] -= lr * beta * self.optimizer_state[key]
+
+        elif opt == 'rmsprop':
+            for key in self.theta:
+                self.optimizer_state[key] = beta * self.optimizer_state[key] + (1 - beta) * np.square(grads[key])
+                self.theta[key] -= lr * grads[key] / (np.sqrt(self.optimizer_state[key]) + epsilon)
+
+        elif opt in ['adam', 'nadam']:
             self.optimizer_state['t'] += 1
-            for key in self.parameters:
-                self.optimizer_state['m'][key] = (self.config.beta1 * self.optimizer_state['m'][key] + 
-                                                  (1 - self.config.beta1) * grads[key])
-                self.optimizer_state['v'][key] = (self.config.beta2 * self.optimizer_state['v'][key] + 
-                                                  (1 - self.config.beta2) * np.square(grads[key]))
-                m_hat = self.optimizer_state['m'][key] / (1 - self.config.beta1 ** self.optimizer_state['t'])
-                v_hat = self.optimizer_state['v'][key] / (1 - self.config.beta2 ** self.optimizer_state['t'])
-                
-                if self.config.optimizer == "adam":
-                    self.parameters[key] -= self.config.learning_rate * m_hat / (np.sqrt(v_hat) + self.config.epsilon)
-                else:  # nadam
-                    m_hat_next = self.config.beta1 * m_hat + (1 - self.config.beta1) * grads[key] / (1 - self.config.beta1 ** self.optimizer_state['t'])
-                    self.parameters[key] -= self.config.learning_rate * m_hat_next / (np.sqrt(v_hat) + self.config.epsilon)
-    
-    def train(self, X_train, y_train, X_val, y_val):
+            m = self.optimizer_state['m']
+            v = self.optimizer_state['v']
+
+            for key in self.theta:
+                m[key] = beta1 * m[key] + (1 - beta1) * grads[key]
+                v[key] = beta2 * v[key] + (1 - beta2) * np.square(grads[key])
+
+                m_hat = m[key] / (1 - beta1**self.optimizer_state['t'])
+                v_hat = v[key] / (1 - beta2**self.optimizer_state['t'])
+
+                if opt == 'nadam':
+                    m_hat = beta1 * m_hat + (1 - beta1) * grads[key]
+
+                self.theta[key] -= lr * m_hat / (np.sqrt(v_hat) + epsilon)
+
+    def train(self):
+        X, Y = self.X_train, self.y_train
+        m = X.shape[1]
+        batch_size = self.config.batch_size or m
+        steps_per_epoch = m // batch_size
+
         for epoch in range(self.config.epochs):
-            for i in range(0, X_train.shape[1], self.config.batch_size):
-                X_batch = X_train[:, i:i+self.config.batch_size]
-                y_batch = y_train[:, i:i+self.config.batch_size]
-                
-                A_out, caches = self.forward(X_batch)
-                grads = self.backward(X_batch, y_batch, caches)
-                self.update_parameters(grads)
-            
-            train_loss = self._compute_loss(X_train, y_train)
-            val_loss = self._compute_loss(X_val, y_val)
-            val_accuracy = self._compute_accuracy(X_val, y_val)
-            
+            permutation = np.random.permutation(m)
+            X_shuffled = X[:, permutation]
+            Y_shuffled = Y[:, permutation]
+
+            epoch_loss = 0
+            for step in range(steps_per_epoch):
+                start = step * batch_size
+                end = start + batch_size
+                X_batch = X_shuffled[:, start:end]
+                Y_batch = Y_shuffled[:, start:end]
+
+                fpass = self.forward(X_batch)
+                grads = self.backward(X_batch, Y_batch, fpass)
+                self._update_parameters(grads)
+
+                epoch_loss += self.compute_loss(Y_batch, fpass['y_hat'])
+
+            # Validation
+            val_fpass = self.forward(self.X_val)
+            val_loss = self.compute_loss(self.y_val, val_fpass['y_hat'])
+            val_acc = self.accuracy(self.X_val, self.y_val)
+
             wandb.log({
                 "epoch": epoch,
-                "train_loss": train_loss,
+                "train_loss": epoch_loss/steps_per_epoch,
                 "val_loss": val_loss,
-                "val_accuracy": val_accuracy
+                "val_acc": val_acc
             })
-            
-            print(f"Epoch {epoch+1}/{self.config.epochs}, "
-                  f"Train Loss: {train_loss:.4f}, "
-                  f"Val Loss: {val_loss:.4f}, "
-                  f"Val Accuracy: {val_accuracy:.4f}")
-    
-    def _compute_loss(self, X, y):
-        A_out, _ = self.forward(X)
-        if self.config.loss == "cross_entropy":
-            return cross_entropy_loss(y, A_out)
-        else:
-            return mean_squared_error(y, A_out)
-    
-    def _compute_accuracy(self, X, y):
-        A_out, _ = self.forward(X)
-        predictions = np.argmax(A_out, axis=0)
-        return np.mean(predictions == np.argmax(y, axis=0))
 
+    def accuracy(self, X, y):
+        fpass = self.forward(X)
+        predictions = np.argmax(fpass['y_hat'], axis=0)
+        labels = np.argmax(y, axis=0)
+        return np.mean(predictions == labels)
 def main(config):
-    wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=config)
-    
-    if config.dataset == "mnist":
-        (X_train, y_train), (X_test, y_test) = mnist.load_data()
-    else:
-        (X_train, y_train), (X_test, y_test) = fashion_mnist.load_data()
-    
-    X_train = X_train.reshape(X_train.shape[0], -1).T / 255.0
-    X_test = X_test.reshape(X_test.shape[0], -1).T / 255.0
-    y_train = np.eye(10)[y_train].T
-    y_test = np.eye(10)[y_test].T
-    
-    X_train, X_val = X_train[:, :50000], X_train[:, 50000:]
-    y_train, y_val = y_train[:, :50000], y_train[:, 50000:]
-    
-    model = NeuralNetwork(config)
-    model.train(X_train, y_train, X_val, y_val)
-    
-    test_accuracy = model._compute_accuracy(X_test, y_test)
-    wandb.log({"test_accuracy": test_accuracy})
-    print(f"Test Accuracy: {test_accuracy:.4f}")
+    wandb.init( )
+    config = wandb.config
+
+    # Create meaningful run name
+    wandb.run.name = (
+        f"D4deben_hl{config.num_layers}_bs{config.batch_size}_"
+        f"{config.activation[:3]}_lr{config.lr}_"
+        f"{config.optimizer[:3]}_wd{config.weight_decay}"
+    )
+
+    model = FeedForward(config)
+    model.train()
+
+    test_acc = model.accuracy(model.X_test, model.y_test)
+    wandb.log({"test_acc": test_acc})
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
