@@ -14,3 +14,5 @@ python train.py --wandb_entity myname --wandb_project myprojectname
 
 wandb  report link:
 https://wandb.ai/cs24m016-indian-institute-of-technology-madras/DL_A1/reports/DA6401-Assignment-1--VmlldzoxMTU5NjA5Nw
+
+https://api.wandb.ai/links/cs24m016-indian-institute-of-technology-madras/ztfefyud
