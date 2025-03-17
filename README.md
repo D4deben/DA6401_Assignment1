@@ -10,3 +10,7 @@ Feedforward Neural Network with Backpropagation
 python train.py --wandb_entity myname --wandb_project myprojectname
 
 -The script will train the neural network on the Fashion MNIST dataset (by default) and log the results to Weights & Biases.
+
+
+wandb  report link:
+https://wandb.ai/cs24m016-indian-institute-of-technology-madras/DL_A1/reports/DA6401-Assignment-1--VmlldzoxMTU5NjA5Nw
